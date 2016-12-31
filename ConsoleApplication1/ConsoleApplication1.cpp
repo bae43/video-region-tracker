@@ -4,8 +4,11 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
 
-#include "opencv2/imgproc.hpp"
+#include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
+#include <opencv2/features2d.hpp>
+#include "opencv2/features2d.hpp"
+#include "opencv2/calib3d.hpp"
 
 #include <iostream>
 #include <list>
@@ -14,14 +17,14 @@
 using namespace cv;
 using namespace std;
 
-void drawBox(Mat& img, float x, float y, int h, int w) {
+void drawBox(Mat& img, const Point2f& p1, const Point2f& p2, const Point2f& p3, const Point2f& p4) {
 	Scalar color(255, 255, 0); // BGR
 	int thickness = 2;
 
-	line(img, Point2f(x, y), Point2f(x + w, y), color, thickness);
-	line(img, Point2f(x + w, y), Point2f(x + w, y + h), color, thickness);
-	line(img, Point2f(x + w, y + h), Point2f(x, y + h), color, thickness);
-	line(img, Point2f(x, y + h), Point2f(x, y), color, thickness);
+	line(img, p1, p2, color, thickness);
+	line(img, p2, p3, color, thickness);
+	line(img, p3, p4, color, thickness);
+	line(img, p4, p1, color, thickness);
 }
 
 void renderTrack(Mat3b& img, const list<Point2f>& track, const Scalar& color) {
@@ -29,7 +32,6 @@ void renderTrack(Mat3b& img, const list<Point2f>& track, const Scalar& color) {
 	Point2f prev;
 	Point2f cur = track.front();
 
-	// circle(img, cur, 3, color, 3);
 	for (auto iterator = track.begin(); iterator != track.end(); iterator++) {
 		prev = cur;
 		cur = *iterator;
@@ -79,10 +81,17 @@ void getBestAnchors(const Point2f& center, const vector<Point2f>& possible, vect
 int main(int argc, char** argv) {
 
 	const string input = "C:\\Users\\bae43\\Documents\\Visual Studio 2015\\Projects\\ConsoleApplication1\\video1.mp4";
-	float x = 17;
-	float y = 57;
+	const float x = 17;
+	const float y = 57;
 	const int w = 558;
 	const int h = 303;
+
+	// CW from top left
+	Point2f p1(x, y);
+	Point2f p2(x + w, y);
+	Point2f p3(x + w, y + h);
+	Point2f p4(x, y + h);
+	vector<Point2f> points = { p1, p2, p3, p4 };
 
 	VideoCapture cap(input);
 	if (!cap.isOpened()) {
@@ -91,8 +100,6 @@ int main(int argc, char** argv) {
 	}
 
 	long lastFrame = cap.get(CV_CAP_PROP_FRAME_COUNT); //get the frame count
-	//cap.set(CV_CAP_PROP_POS_FRAMES, count - 1); //Set index to last frame
-	//namedWindow("MyVideo", CV_WINDOW_AUTOSIZE);
 	
 	Mat3b frameBgr;
 	Mat1b frameGray;
@@ -128,7 +135,7 @@ int main(int argc, char** argv) {
 
 	// initialize first frame features
 	cvtColor(frameBgr, prevFrameGray, CV_BGR2GRAY);
-	goodFeaturesToTrack(prevFrameGray, prevPoints, 50, 0.2, 20);
+	goodFeaturesToTrack(prevFrameGray, prevPoints, 50, 0.15, 20);
 	for (int i = 0; i < prevPoints.size(); i++) {
 		tracks[i].push_back(Point2f(prevPoints[i].x, prevPoints[i].y));
 	}
@@ -137,8 +144,6 @@ int main(int argc, char** argv) {
 	snprintf(buf, 1024, "C:\\Users\\bae43\\Documents\\Visual Studio 2015\\Projects\\ConsoleApplication1\\Debug\\frame-%04d.png", 0);
 	imwrite(buf, frameBgr);
 
-	/// XXX
-	//lastFrame = 20;
 	for (long curFrame = 1; curFrame < lastFrame; curFrame++) {
 	
 		bool success = cap.read(frameBgr);
@@ -155,6 +160,8 @@ int main(int argc, char** argv) {
 
 		vector<Point2f> prevGoodPoints;
 		vector<Point2f> curGoodPoints;
+
+		// filter to only ones that are tracked
 		for (int i = 0; i < curPoints.size(); i++) {
 			if (status[i] > 0) {
 				tracks[i].push_back(Point2f(curPoints[i].x, curPoints[i].y));
@@ -168,41 +175,16 @@ int main(int argc, char** argv) {
 		
 		}
 
-		// ensures anchors is also sorted by distance
-		Point2f center(x + w / 2, y + h / 2);
-		getBestAnchors(center, curGoodPoints, anchors, anchorCount);
+		Mat h = findHomography(prevGoodPoints, curGoodPoints);
+		vector<Point2f> newPoints(4);
+		perspectiveTransform(points, newPoints, h);
 
-		Point2f update;
-		int offsetIdx;
-
-		// take median
-		if (anchors.size() >= 3) {
-			auto cmp = [](Point2f p1, Point2f p2) { return (p1.x * p1.x + p1.y * p1.y) < (p2.x * p2.x + p2.y * p2.y); };
-			priority_queue<int, std::vector<Point2f>, decltype(cmp)> q(cmp);
-			for (int i = anchors.size() / 2 - 1; i <= anchors.size() / 2 + 1; i++) {
-				offsetIdx = anchors[i];
-				q.push(Point2f(curGoodPoints[offsetIdx] - prevGoodPoints[offsetIdx]));
-			}
-			q.pop();
-			update = q.top();
-		}
-		else {
-			offsetIdx = anchors[anchors.size() / 2];
-			update = curGoodPoints[offsetIdx] - prevGoodPoints[offsetIdx];
-		}
+		points = newPoints;
 		
-		x += update.x;
-		y += update.y;
-		for (int i = 0; i < anchors.size(); i++) {
-			line(frameBgr, center, curGoodPoints[anchors[i]], Scalar(128, 128, 128));
-		}
-		centerTrack.push_back(Point2f(x + w / 2, y + h / 2));
+		centerTrack.push_back(Point2f((points[0] + points[1] + points[2] + points[3]) / 4));
 		renderTrack(frameBgr, centerTrack, Scalar(255, 255, 255));
 
-		// highlight best tracking point
-		line(frameBgr, center, curGoodPoints[offsetIdx], Scalar(0, 255, 0));
-
-		drawBox(frameBgr, x, y, h, w);
+		drawBox(frameBgr, points[0], points[1], points[2], points[3]);
 		for (int i = 0; i < tracks.size(); i++) {
 			if (tracks[i].size() > 1) {
 				renderTrack(frameBgr, tracks[i], trackColors[i]);
@@ -213,8 +195,6 @@ int main(int argc, char** argv) {
 		snprintf(buf, 1024, "C:\\Users\\bae43\\Documents\\Visual Studio 2015\\Projects\\ConsoleApplication1\\Debug\\frame-%04d.png", curFrame);
 		imwrite(buf, frameBgr);
 
-		//drawBox(frameBgr, 100, 100, 50, 50);
-		//imshow("MyVideo", frame);
 		if (waitKey(0) == 27) break;
 		
 		prevFrameGray = frameGray.clone();
@@ -222,7 +202,7 @@ int main(int argc, char** argv) {
 
 		// reset if too many tracks lost
 		if (curGoodPoints.size() < anchorCount) {
-			goodFeaturesToTrack(prevFrameGray, prevPoints, 50, 0.2, 20);
+			goodFeaturesToTrack(prevFrameGray, prevPoints, 50, 0.15, 20);
 			for (int i = 0; i < prevPoints.size(); i++) {
 				tracks[i].clear();
 				tracks[i].push_back(Point2f(prevPoints[i].x, prevPoints[i].y));
